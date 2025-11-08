@@ -1,31 +1,62 @@
-# This workflow will do a clean installation of node dependencies, cache/restore them, build the source code and run tests across different versions of node
-# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-nodejs
-
 name: Node.js CI
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   pull_request:
-    branches: [ "main" ]
+    branches: ["main"]
 
 jobs:
   build:
-
     runs-on: self-hosted
 
-    strategy:
-      matrix:
-        node-version: [20.x]
-        # See supported Node.js release schedule at https://nodejs.org/en/about/releases/
+    env:
+      # Make sure PM2 uses the same home as your ubuntu user/session
+      PM2_HOME: /home/ubuntu/.pm2
+      # If your backend lives in a subfolder, change this to that folder
+      APP_DIR: ${{ github.workspace }}
 
     steps:
-    - uses: actions/checkout@v4
-    - name: Use Node.js ${{ matrix.node-version }}
-      uses: actions/setup-node@v4
-      with:
-        node-version: ${{ matrix.node-version }}
-        cache: 'npm'
-    - run: npm ci
-    - run: npm run build --if-present
-    - run: pm2 restart apiserver
+      - uses: actions/checkout@v4
+
+      - name: Print workspace & files (debug)
+        run: |
+          echo "GITHUB_WORKSPACE=$GITHUB_WORKSPACE"
+          ls -la
+
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+          cache: npm
+
+      - name: Install deps & build
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          npm ci || npm install
+          npm run build --if-present
+
+      - name: Install PM2
+        run: |
+          npm i -g pm2
+          pm2 -v
+
+      - name: Start or reload with PM2 (idempotent)
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          echo "PWD=$(pwd)"
+          test -f ecosystem.config.js || { echo "ecosystem.config.js not found in $(pwd)"; exit 1; }
+
+          # If the app exists, reload/restart; else start it
+          if pm2 describe apiserver >/dev/null 2>&1; then
+            echo " apiserver exists -> restarting with updated env"
+            pm2 restart apiserver --update-env
+          else
+            echo "apiserver not found -> starting from ecosystem"
+            # startOrReload is safe if available; fallback to start
+            pm2 startOrReload ecosystem.config.js --env production 2>/dev/null || \
+            pm2 start ecosystem.config.js --env production
+          fi
+
+          pm2 save
+          pm2 ls
